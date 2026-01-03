@@ -1,186 +1,182 @@
 #include <iostream>
-#include <iomanip>
 #include <filesystem>
+#include <vector>
 
-#include "gene/GameplayGene.h"
-#include "gene/AppearanceGene.h"
-#include "systems/GeneSystem.h"
-#include "geometry/SimpleAvatarGenerator.h"
-#include "render/ConsoleAdapter.h"
-#include "tools/ObjExporter.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#include "ecs/Registry.h"
+#include "process/EffectRecorder.h"
+#include "process/ProcessContext.h"
+#include "process/ProcessScheduler.h"
+#include "simulation/SimulationState.h"
+#include "systems/PopulationSystem.h"
+#include "systems/CreatureSystem.h"
+#include "systems/ConversionSystem.h"
+#include "export/DataExporter.h"
+#include "components/Components.h"
 
 // ============================================================
-// 模型生成最小验证Demo
-// 验证完整数据流：GameplayGene → AppearanceGene → MeshData
+// GameWorld ERPE生态模拟主程序
+// 演示种群涌现、HQ/LQ切换、捕食者-猎物动态
 // ============================================================
 
-void PrintGameplayGene(const GameplayGene& gene) {
-    std::cout << "\n--- Gameplay Gene (Logical) ---\n";
-    std::cout << "  Species ID: " << gene.species_id << "\n";
-    std::cout << "  Seed: " << gene.seed << "\n";
-    std::cout << "  [Shared Fields - affect both logic & appearance]\n";
-    std::cout << "    Limb Length: " << gene.limb_length << "\n";
-    std::cout << "    Body Mass:   " << gene.body_mass << "\n";
-    std::cout << "    Size Scale:  " << gene.size_scale << "\n";
-    std::cout << "  [Logic-Only Fields]\n";
-    std::cout << "    Strength:   " << gene.base_strength << "\n";
-    std::cout << "    Agility:    " << gene.base_agility << "\n";
-    std::cout << "    Endurance:  " << gene.base_endurance << "\n";
-    std::cout << "    Intellect:  " << gene.base_intellect << "\n";
-    std::cout << "  [Special Traits]\n";
-    std::cout << "    Has Wings: " << (gene.has_wings ? "Yes" : "No") << "\n";
-    std::cout << "    Has Horn:  " << (gene.has_horn ? "Yes" : "No") << "\n";
-}
+void initialize_populations(ecs::Registry& registry, SimulationState& state) {
+    std::cout << "\n=== Initializing World Populations ===" << std::endl;
 
-void PrintAppearanceGene(const AppearanceGene& gene) {
-    std::cout << "\n--- Appearance Gene (Visual) ---\n";
-    std::cout << "  Species ID: " << gene.species_id << "\n";
-    std::cout << "  Seed: " << gene.seed << "\n";
-    std::cout << "  [Mapped from GameplayGene]\n";
-    std::cout << "    Height:      " << std::fixed << std::setprecision(2) << gene.height << "\n";
-    std::cout << "    Fatness:     " << gene.fatness << "\n";
-    std::cout << "    Musculature: " << gene.musculature << "\n";
-    std::cout << "  [Pure Visual - Random]\n";
-    std::cout << "    Base Tone:          " << gene.base_tone << "\n";
-    std::cout << "    Pattern Variation:  " << gene.pattern_variation << "\n";
-    std::cout << "    Scar Level:         " << gene.scar_level << "\n";
-}
+    const auto& all_species = state.get_all_species_templates();
+    const auto& all_regions = state.get_all_regions();
 
-GameplayGene CreateTestCreature(uint32_t seed, const char* name, 
-                                float limb, float mass, float scale,
-                                float str, float agi, float end, float intel) {
-    std::cout << "\n\n========================================\n";
-    std::cout << "Creating Creature: " << name << "\n";
-    std::cout << "========================================\n";
-    
-    GameplayGene gene;
-    gene.species_id = 1;  // 假设物种ID为1
-    gene.seed = seed;
-    gene.limb_length = limb;
-    gene.body_mass = mass;
-    gene.size_scale = scale;
-    gene.base_strength = str;
-    gene.base_agility = agi;
-    gene.base_endurance = end;
-    gene.base_intellect = intel;
-    gene.has_wings = false;
-    gene.has_horn = false;
-    
-    return gene;
+    // 为每个Region创建物种种群
+    for (const auto& [region_id, region] : all_regions) {
+        for (const auto& species : all_species) {
+            // 跳过某些不适合的组合（例如熊只在部分Region出现）
+            if (species.id == 3 && (region_id == 4 || region_id == 5)) {
+                continue;  // 熊不在沼泽和河流出现
+            }
+
+            // 创建Population实体
+            EntityId pop_id = registry.create_entity(EntityType::Population);
+
+            // 初始种群数量
+            uint32_t initial_count = 0;
+            if (species.id == 1) {  // Rabbit
+                initial_count = 100 + (region_id * 20);  // 100-220
+            } else if (species.id == 2) {  // Wolf
+                initial_count = 10 + (region_id * 2);   // 10-22
+            } else if (species.id == 3) {  // Bear
+                initial_count = 5 + region_id;          // 6-11
+            }
+
+            // 添加Population组件
+            registry.add_component(pop_id, component::Population{
+                species.id,
+                region_id,
+                initial_count,
+                species.base_birth_rate,
+                species.base_death_rate,
+                component::Population::Mode::Simulated,  // 初始为LQ模式
+                species.limb_length_mean,
+                species.body_mass_mean,
+                species.size_scale_mean,
+                species.limb_length_std,
+                species.body_mass_std,
+                species.size_scale_std
+            });
+
+            std::cout << "  Created Population: " << species.name
+                      << " in " << region.name
+                      << " (initial count: " << initial_count << ")" << std::endl;
+        }
+    }
+
+    std::cout << "World initialization complete!\n" << std::endl;
 }
 
 int main() {
-    std::cout << "╔════════════════════════════════════════════╗\n";
-    std::cout << "║  GameWorld - Model Generation Demo        ║\n";
-    std::cout << "║  Validating: Gene → Appearance → Mesh     ║\n";
-    std::cout << "╚════════════════════════════════════════════╝\n";
-    
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+
+    std::cout << "╔═══════════════════════════════════════════════════╗\n";
+    std::cout << "║  GameWorld - ERPE Ecosystem Simulation           ║\n";
+    std::cout << "║  ERPE生态模拟系统 - 种群涌现与HQ/LQ切换演示       ║\n";
+    std::cout << "╚═══════════════════════════════════════════════════╝\n";
+
     // 创建输出目录
     std::filesystem::create_directories("./output");
-    
-    // 创建渲染适配器和几何生成器
-    render::ConsoleAdapter render_adapter;
-    geometry::SimpleAvatarGenerator avatar_generator;
-    
-    // ========== 测试案例1：瘦高敏捷型角色 ==========
-    {
-        GameplayGene gene = CreateTestCreature(
-            1001, "Agile Scout",
-            2.0f,  // 长肢体 → 身高
-            1.5f,  // 轻体重 → 瘦
-            1.0f,  // 正常体型
-            0.5f,  // 低力量
-            1.5f,  // 高敏捷
-            1.0f,  // 正常耐力
-            1.2f   // 较高智力
-        );
-        
-        PrintGameplayGene(gene);
-        
-        // 映射到外观基因
-        AppearanceGene appearance = systems::GeneSystem::BuildAppearanceFromGameplay(gene);
-        PrintAppearanceGene(appearance);
-        
-        // 生成几何体
-        AvatarBundle bundle = avatar_generator.generate(appearance);
-        
-        // 上传到渲染适配器
-        AvatarId avatar_id = render_adapter.CreateAvatar(bundle);
-        
-        // 导出为 OBJ 文件
-        if (ObjExporter::ExportAvatar("agile_scout", bundle.meshes)) {
-            std::cout << "  📁 Exported: output/agile_scout.obj\n";
+
+    // ========== 1. 初始化核心组件 ==========
+    std::cout << "\n[1/7] Initializing core components..." << std::endl;
+    ecs::Registry registry;
+    ecs::EffectRecorder recorder;
+    SimulationState state;
+
+    state.initialize();
+
+    // ========== 2. 创建数据导出器 ==========
+    std::cout << "[2/7] Creating data exporter..." << std::endl;
+    DataExporter exporter("output/simulation_data.csv");
+
+    // ========== 3. 创建Process和System ==========
+    std::cout << "[3/7] Creating process scheduler and systems..." << std::endl;
+    ProcessContext ctx(registry, recorder, state);
+    process::ProcessScheduler scheduler(ctx);
+    PopulationSystem pop_system(scheduler);
+    CreatureSystem creature_system(scheduler);
+    ConversionSystem conversion_system(scheduler, state);
+
+    // ========== 4. 初始化世界（创建种群） ==========
+    std::cout << "[4/7] Initializing world populations..." << std::endl;
+    initialize_populations(registry, state);
+
+    // ========== 5. 主模拟循环 ==========
+    std::cout << "\n[5/7] Starting simulation..." << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
+    const float dt = 1.0f;              // 每步1天
+    const float total_time = 500.0f;    // 总共500天
+    const uint32_t log_interval = 10;   // 每10步输出一次
+
+    for (uint32_t step = 0; state.current_time < total_time; ++step) {
+        recorder.clear();
+
+        // HQ/LQ转换检查
+        conversion_system.update_region_modes();
+
+        // 更新种群（LQ区域）
+        pop_system.update(dt);
+
+        // 更新个体（HQ区域）
+        creature_system.update(dt);
+
+        // 记录数据（每log_interval步）
+        if (step % log_interval == 0) {
+            exporter.write_timestep(state.current_time, registry, state);
+
+            // 简单控制台输出
+            if (step % (log_interval * 5) == 0) {  // 每50步输出摘要
+                const auto& all_pops = registry.view<component::Population>();
+                uint32_t total_rabbits = 0, total_wolves = 0, total_bears = 0;
+
+                for (EntityId pop_id : all_pops) {
+                    const auto& pop = registry.get_component<component::Population>(pop_id);
+                    if (pop.species_id == 1) total_rabbits += pop.estimated_count;
+                    else if (pop.species_id == 2) total_wolves += pop.estimated_count;
+                    else if (pop.species_id == 3) total_bears += pop.estimated_count;
+                }
+
+                std::cout << "t=" << static_cast<int>(state.current_time)
+                          << " | Rabbits: " << total_rabbits
+                          << " | Wolves: " << total_wolves
+                          << " | Bears: " << total_bears
+                          << " | Effects: " << recorder.size() << std::endl;
+            }
         }
+
+        // 推进时间
+        state.current_time += dt;
     }
-    
-    // ========== 测试案例2：强壮重型角色 ==========
-    {
-        GameplayGene gene = CreateTestCreature(
-            2002, "Heavy Warrior",
-            1.5f,  // 中等肢体
-            3.5f,  // 重体重 → 胖
-            1.5f,  // 大体型
-            2.0f,  // 高力量
-            0.5f,  // 低敏捷
-            2.0f,  // 高耐力
-            0.3f   // 低智力
-        );
-        
-        PrintGameplayGene(gene);
-        
-        AppearanceGene appearance = systems::GeneSystem::BuildAppearanceFromGameplay(gene);
-        PrintAppearanceGene(appearance);
-        
-        AvatarBundle bundle = avatar_generator.generate(appearance);
-        AvatarId avatar_id = render_adapter.CreateAvatar(bundle);
-        
-        // 导出为 OBJ 文件
-        if (ObjExporter::ExportAvatar("heavy_warrior", bundle.meshes)) {
-            std::cout << "  📁 Exported: output/heavy_warrior.obj\n";
-        }
-    }
-    
-    // ========== 测试案例3：平衡型角色 ==========
-    {
-        GameplayGene gene = CreateTestCreature(
-            3003, "Balanced Mage",
-            1.8f,  // 中等偏高肢体
-            2.0f,  // 中等体重
-            1.2f,  // 中等偏大体型
-            1.0f,  // 平衡力量
-            1.0f,  // 平衡敏捷
-            1.0f,  // 平衡耐力
-            2.5f   // 极高智力
-        );
-        
-        PrintGameplayGene(gene);
-        
-        AppearanceGene appearance = systems::GeneSystem::BuildAppearanceFromGameplay(gene);
-        PrintAppearanceGene(appearance);
-        
-        AvatarBundle bundle = avatar_generator.generate(appearance);
-        AvatarId avatar_id = render_adapter.CreateAvatar(bundle);
-        
-        // 导出为 OBJ 文件
-        if (ObjExporter::ExportAvatar("balanced_mage", bundle.meshes)) {
-            std::cout << "  📁 Exported: output/balanced_mage.obj\n";
-        }
-    }
-    
-    std::cout << "\n\n╔════════════════════════════════════════════╗\n";
-    std::cout << "║  ✅ Validation Complete!                  ║\n";
-    std::cout << "║                                            ║\n";
-    std::cout << "║  Data Flow Verified:                       ║\n";
-    std::cout << "║  GameplayGene → AppearanceGene → Mesh     ║\n";
-    std::cout << "║                                            ║\n";
-    std::cout << "║  Architecture Validated:                   ║\n";
-    std::cout << "║  • Gene separation (logic vs visual)      ║\n";
-    std::cout << "║  • Geometry generation (engine-agnostic)  ║\n";
-    std::cout << "║  • Render adapter (decoupled)             ║\n";
-    std::cout << "║                                            ║\n";
-    std::cout << "║  📁 OBJ Files Exported to ./output/        ║\n";
-    std::cout << "║  Open with Windows 3D Viewer or Blender!  ║\n";
-    std::cout << "╚════════════════════════════════════════════╝\n";
-    
+
+    // ========== 6. 完成并提示 ==========
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "[6/7] Simulation complete!" << std::endl;
+
+    exporter.finalize();
+
+    std::cout << "\n✅ Data exported to: output/simulation_data.csv" << std::endl;
+    std::cout << "\n📊 To visualize results, run:" << std::endl;
+#ifdef _WIN32
+    std::cout << "   python\\python.exe python\\visualize.py output\\simulation_data.csv" << std::endl;
+#else
+    std::cout << "   python python/visualize.py output/simulation_data.csv" << std::endl;
+#endif
+
+    std::cout << "\n╔═══════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║  ERPE Simulation Demo Complete!                  ║" << std::endl;
+    std::cout << "╚═══════════════════════════════════════════════════╝\n" << std::endl;
+
     return 0;
 }

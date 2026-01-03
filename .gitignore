@@ -29,6 +29,8 @@ CTestTestfile.cmake
 # VSCode
 .vscode/
 
+.claude/
+
 # Executables
 *.exe
 *.out

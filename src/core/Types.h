@@ -10,6 +10,8 @@
 using EntityId = uint64_t;
 using SpeciesId = uint32_t;
 using AvatarId = uint64_t;
+using RegionId = uint32_t;
+using ProcessId = uint32_t;
 
 // 实体类型枚举
 enum class EntityType {
